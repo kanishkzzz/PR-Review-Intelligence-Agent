@@ -1,0 +1,22 @@
+# Environment files
+.env
+**/.env
+
+# Python
+venv/
+**/venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# VSCode
+.vscode/
+
+# Node (if client uses it)
+node_modules/
+**/node_modules/
+dist/
+build/
+
+# OS
+.DS_Store
