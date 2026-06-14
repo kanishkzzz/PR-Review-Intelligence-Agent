@@ -24,9 +24,9 @@ async def fetch_pr_metadata(pr_url: str, token: str):
     if token:
       khopda["Authorization"] = f"bearer {token}"
       
-    async with httpx.AsyncClient as client:
-      jawaab = client.get(
-        f"ttps://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
+    async with httpx.AsyncClient() as client:
+      jawaab = await client.get(
+        f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
         headers = khopda
       )
     
@@ -53,9 +53,9 @@ async def fetch_pr_diff(pr_url: str, token: str=None):
   if token:
     khopda["Authorization"] = f"bearer {token}"
   
-  async with httpx.AsyncClient as client:
+  async with httpx.AsyncClient() as client:
     response = await client.get(
-      f"https://api.github.com/repos/{owner}/{repo}/pulls/pr_number/files",
+      f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files",
       headers = khopda
     )
     
@@ -70,7 +70,7 @@ async def fetch_pr_diff(pr_url: str, token: str=None):
         "status": f["status"],
         "additions": f["additions"],
         "deletions": f["deletions"],
-        "patch": f.get("patch", "")
+        "patch": f.get("patch", "")[:500]
       }
       for f in files
     ]
@@ -96,6 +96,8 @@ async def fetch_file_context(repo_full_name: str, file_path: str, token: str = N
   
   try:
     content = base64.b64decode(data["content"]).decode("utf-8")
+    lines = content.split("\n")
+    return "\n".join(lines[:100]) 
   except UnicodeDecodeError:
     return f"[Skipped: Unable to decode content of {file_path}]"
   
