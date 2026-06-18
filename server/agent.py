@@ -97,19 +97,22 @@ async def run_tool(tool_name: str, tool_args: dict, token: str = None):
 async def run_agent(pr_url: str, token: str = None):
     messages = [
         {
-            "role": "system",
-            "content": """Tu ek senior software engineer hai.
+    "role": "system",
+    "content": """Tu ek senior software engineer hai.
 Tera kaam hai GitHub PR ko deeply review karna.
 
-Hamesha yeh order follow kar:
-1. Pehle fetch_pr_metadata call kar
-2. Phir fetch_pr_diff call kar  
-3. Agar koi file suspicious lage toh fetch_file_context call kar
+Hamesha yeh EXACT order follow kar:
+1. fetch_pr_metadata call kar
+2. fetch_pr_diff call kar
+3. Har changed file ke liye search_codebase call kar — 
+   yeh batayega ki woh code aur kahan use ho raha hai
+4. Suspicious files ke liye fetch_file_context call kar
 
 Review mein yeh check karna hai:
 - Security issues (exposed keys, auth bypass, injection)
 - Logic bugs (null checks, edge cases)
-- Breaking changes
+- Breaking changes — search_codebase se pata chalega
+  ki changed code kitni jagah use ho raha hai
 - Code quality
 - Missing tests
 
@@ -123,7 +126,7 @@ Final output SIRF JSON mein dena — koi extra text nahi:
   "suggestions": ["..."],
   "test_cases_missing": ["..."]
 }"""
-        },
+},
         {
             "role": "user",
             "content": f"Is PR ko review karo: {pr_url}"

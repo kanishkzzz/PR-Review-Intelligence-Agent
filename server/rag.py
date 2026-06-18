@@ -4,7 +4,7 @@ from sentence_transformers import SentenceTransformer
 from tools import fetch_file_context
 
 #setup
-chroma_client = chromadb.PeristentClient(path="./chroma-db")
+chroma_client = chromadb.PersistentClient(path="./chroma-db")
 collection = chroma_client.get_or_create_collection(name="repo_index")
 
 
@@ -69,7 +69,7 @@ def search_similar_code(query: str, n_results: int = 3):
   
   #ChromaDB mein search karo
   results = collection.query(
-    query_embedding=[query_embedding],
+    query_embeddings=[query_embedding],
     n_results=n_results
   )
   
@@ -78,7 +78,7 @@ def search_similar_code(query: str, n_results: int = 3):
   for i, doc in enumerate(results["documents"][0]):
     similar_chunks.append({
       "content":doc,
-      "file": results["metadata"][0][i]["file"],
+      "file": results["metadatas"][0][i]["file"],
       "score": results["distances"][0][i]
     })
     

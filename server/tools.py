@@ -21,7 +21,7 @@ async def fetch_pr_metadata(pr_url: str, token: str):
     
     khopda = {"Accept": "application/vnd.github+json"}
     
-    if token:
+    if token and token.strip():
       khopda["Authorization"] = f"bearer {token}"
       
     async with httpx.AsyncClient() as client:
@@ -50,7 +50,7 @@ async def fetch_pr_diff(pr_url: str, token: str=None):
   owner, repo , pr_number = parse_pr_url(pr_url);
   
   khopda = {"Accept": "application/vnd.github+diff"}
-  if token:
+  if token and token.strip():
     khopda["Authorization"] = f"bearer {token}"
   
   async with httpx.AsyncClient() as client:
@@ -80,7 +80,7 @@ async def fetch_file_context(repo_full_name: str, file_path: str, token: str = N
     return f"[Skipped: binary or Unsupported file type: {file_path}]"
   
   khopda = {"Accept": "application/vnd.github+json"}
-  if token:
+  if token and token.strip():
     khopda["Authorization"] = f"Bearer {token}"
     
   async with httpx.AsyncClient() as client:
@@ -90,7 +90,7 @@ async def fetch_file_context(repo_full_name: str, file_path: str, token: str = N
     )
   
   if response.status_code != 200:
-    raise Exception(f"File not found or deleted: {file_path}")
+    return (f"File not found or deleted: {file_path}")
   
   data = response.json()
   
