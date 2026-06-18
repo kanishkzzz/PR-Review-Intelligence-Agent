@@ -176,3 +176,170 @@ Final output SIRF JSON mein dena — koi extra text nahi:
                 return json.loads(final_review)
             except json.JSONDecodeError:
                 return {"raw_review": final_review}
+            
+async def gather_pr_context(pr_url: str, token: str = None):
+    """
+    Saara data ek baar mein gather karta hai —
+    teeno specialist agents isi data ko use karenge
+    """
+    metadata = await fetch_pr_metadata(pr_url, token)
+    diff = await fetch_pr_diff(pr_url, token)
+
+    # Har changed file ke liye codebase context dhundo
+    codebase_context = []
+    for file in diff:
+        filename = file["filename"]
+        results = search_similar_code(filename, n_results=2)
+        codebase_context.append({
+            "file": filename,
+            "related_code": results
+        })
+
+    return {
+        "metadata": metadata,
+        "diff": diff,
+        "codebase_context": codebase_context
+    }
+
+# Specialist Agent 1: Security Chief
+async def run_security_agent(context: dict):
+    """
+    Sirf security issues dhundhta hai - expose keys, auth bypass, injection,
+    insecure connections, harcoded secrets
+    """
+    
+    # Context ko readable string mein convert karo
+    diff_summary = json.dumps(context["diff"], indent=2)
+    codebase_summary = json.dumps(context["codebase_context"], indent=2)
+    metadata = context["metadata"]
+    
+    messages = [
+        {
+        "role": "system",
+        "content": """Tu ek cybersecurity expert hai jo sirf code security review karta hai. 
+        
+SIRF yeh cheezein dhundh:
+- Hardcoded secrets (API keys, JWT secrets, passwords)
+- Authentication/Authorization bypass
+- SQL/NoSQL injection vulnerabilities  
+- Insecure direct object references
+- Sensitive data exposure
+- Insecure dependencies
+- Missing input validation
+
+Logic bugs, code quality, tests — IGNORE kar. Sirf security.
+
+Output SIRF JSON mein de, koi extra text nahi:
+{
+  "agent": "security",
+  "issues": [
+    {
+      "type": "SECURITY",
+      "severity": "HIGH/MEDIUM/LOW",
+      "file": "filename",
+      "description": "exact issue kya hai",
+      "line_hint": "approximate code jo problematic hai"
+    }
+  ],
+  "summary": "2-3 line security overview"
+}"""
+        },
+        {
+            "role": "user",
+            "content": f"""PR Title: {metadata['title']}
+Author: {metadata['author']}
+        
+Changed Files Diff:
+{diff_summary[:3000]}
+        
+Related Codebase Context:
+{codebase_summary[:2000]}
+       
+Sirf security issues find karo."""
+        }
+    ]
+    
+    response = await client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        temperature=0.5,
+        max_tokens=1000
+    )
+    
+    result = response.choices[0].message.content
+    
+    try:
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+        return json.loads(cleaned.strip())
+    except json.JSONDecodeError:
+        return {"agent": "security", "raw": result, "issues":[]}
+    
+#2 Logical Bugs Specialist
+async def run_logic_agent(context: dict):
+    """
+    Sirf logical bugs aur edge cases dhundhta hai
+    """
+    diff_summary = json.dumps(context["diff"], indent=2)
+    codebase_summary = json.dumps(context["codebase_context"], indent=2)
+    metadata = context["metadata"]
+    
+    messages = [
+        {
+            "role": "system",
+            "content": """Tu ek expert bug hunter hai jo sirf logic errors dhoondhta hai
+            
+            SIRF yeh cheezien dhundhna:
+            - Null/undefined pointer exceptions
+            - Race conditions (especially async code mein)
+            - Off-by-one errors
+            - Unhandled promise rejections / missing try-catch
+            - wrong error handling (error slightly swalow ho raha ho)
+            - Incorrect conditional logic
+            - Missing edge cases (Empty array, zero, negative numbers)
+            - Memory leaks
+            
+            Security, code quality, tests -Ignore kar. Sirf logical bugs dekho.
+            
+            Output SIRF Json mein do, koi extra text nahi:
+            {
+                "agent": "logic",
+                "issues": [
+                    {
+                        "type": "LOGIC",
+                        "severity": "High/Medium/Low",
+                        "file": "filename",
+                        "description": "exact bug kya hai aur kab trigger hoga",
+                        "line_hint": "approcimate problematic code"
+                    }
+                    ],
+                    "summary": "2-3 line logic overview"
+            }"""
+        },
+        {
+            "role": "user",
+            "content": f"""PR Title: {metadata['title']}
+            Author: {metadata['author']}
+            
+            Changed Files Diff:
+            {diff_summary[:3000]}
+            
+            Related Codebase Context:
+            {codabase_summary[:2000]}
+            
+            Sirf logic bugs aur edge cases find karo."""
+        }
+    ]
+    
+    response = await client.chat.completions.create(
+        model= "llama-3.3-70b-versatile",
+        messages=messages,
+        temperature=0,
+        max_tokens=1000
+    )
+    
+    result = response.choices[0].message.content
+    return parse_llm_json(result, "logic")
