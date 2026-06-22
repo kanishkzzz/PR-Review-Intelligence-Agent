@@ -3,10 +3,12 @@ from groq import AsyncGroq
 from tools import fetch_pr_metadata, fetch_pr_diff, fetch_file_context
 from dotenv import load_dotenv
 from rag import search_similar_code
-
+import asyncio
 load_dotenv()
 
 client = AsyncGroq()
+
+
 
 TOOLS = [
     {
@@ -77,6 +79,19 @@ TOOLS = [
         }
     }    
 ]
+
+# ── Helper: Clean JSON from LLM response ──────────────────
+def parse_llm_json(result: str, agent_name: str):
+    """LLM response se JSON parse karo — markdown backticks handle karta hai"""
+    try:
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+        return json.loads(cleaned.strip())
+    except json.JSONDecodeError:
+        return {"agent": agent_name, "raw": result, "issues": []}
 
 async def run_tool(tool_name: str, tool_args: dict, token: str = None):
     if tool_name == "fetch_pr_metadata":
@@ -281,7 +296,7 @@ Sirf security issues find karo."""
 #2 Logical Bugs Specialist
 async def run_logic_agent(context: dict):
     """
-    Sirf logical bugs aur edge cases dhundhta hai
+    Sirf Logical bugs aur edge cases dhoondhta hai
     """
     diff_summary = json.dumps(context["diff"], indent=2)
     codebase_summary = json.dumps(context["codebase_context"], indent=2)
@@ -290,52 +305,52 @@ async def run_logic_agent(context: dict):
     messages = [
         {
             "role": "system",
-            "content": """Tu ek expert bug hunter hai jo sirf logic errors dhoondhta hai
+            "content": """Tu ek expert bug hunter hai jo sirf logic errors dhundhta hai.
             
-            SIRF yeh cheezien dhundhna:
+            SIRF yeh cheezien dhundh:
             - Null/undefined pointer exceptions
             - Race conditions (especially async code mein)
             - Off-by-one errors
             - Unhandled promise rejections / missing try-catch
-            - wrong error handling (error slightly swalow ho raha ho)
+            - Wrong error handlin (error silently swallow ho raha ho)
             - Incorrect conditional logic
-            - Missing edge cases (Empty array, zero, negative numbers)
-            - Memory leaks
+            - Missing edge cases (empty array, zero, negative numbers)
+            - Memory Leaks
+
+            Security, code quality, tests - IGNORE kar. Sirf logic bugs.
             
-            Security, code quality, tests -Ignore kar. Sirf logical bugs dekho.
-            
-            Output SIRF Json mein do, koi extra text nahi:
+            Outpur SIRF JSON mein de, koi extra text nahi:
             {
                 "agent": "logic",
-                "issues": [
+                "issues":[
                     {
                         "type": "LOGIC",
-                        "severity": "High/Medium/Low",
+                        "severity": "HIGH/MEDIUM/LOW",
                         "file": "filename",
                         "description": "exact bug kya hai aur kab trigger hoga",
-                        "line_hint": "approcimate problematic code"
+                        "line_hint": "approximate problematic code"
                     }
-                    ],
-                    "summary": "2-3 line logic overview"
-            }"""
+                ],
+                "summary": "2-3 line logic overview"
+            }""" 
         },
         {
-            "role": "user",
+            "role":"user",
             "content": f"""PR Title: {metadata['title']}
             Author: {metadata['author']}
             
-            Changed Files Diff:
+            Changed Files Diff
             {diff_summary[:3000]}
             
             Related Codebase Context:
-            {codabase_summary[:2000]}
+            {codebase_summary[:2000]}
             
             Sirf logic bugs aur edge cases find karo."""
         }
     ]
     
     response = await client.chat.completions.create(
-        model= "llama-3.3-70b-versatile",
+        model="llama-3.3-70b-versatile",
         messages=messages,
         temperature=0,
         max_tokens=1000
@@ -343,3 +358,115 @@ async def run_logic_agent(context: dict):
     
     result = response.choices[0].message.content
     return parse_llm_json(result, "logic")
+
+
+#3 Test Cases Specialist
+async def run_test_agent(context: dict):
+    """
+    Sirf missing test cases dhundta hai
+    """
+    diff_summary = json.dumps(context["diff"], indent=2)
+    codebase_summary = json.dumps(context["codebase_context"], indent=2)
+    metadata = context["metadata"]
+
+    messages = [
+        {
+            "role": "system",
+            "content": """Tu ek QA engineer hai jo sirf test coverage review karta hai.
+
+SIRF yeh cheezein dhundh:
+- Naye functions/endpoints jinke koi unit tests nahi hain
+- Edge cases jo test nahi hue (empty input, null, error paths)
+- Integration tests missing (jaise API endpoints, DB calls)
+- Error handling paths jo untested hain
+- Existing tests jo is PR ke baad break ho sakte hain
+
+Security, logic bugs, code quality — IGNORE kar. Sirf test coverage.
+
+Output SIRF JSON mein de, koi extra text nahi:
+{
+  "agent": "test_coverage",
+  "issues": [
+    {
+      "type": "MISSING_TEST",
+      "severity": "HIGH/MEDIUM/LOW",
+      "file": "filename",
+      "description": "kaunsa scenario test nahi hua aur kyun zaroori hai"
+    }
+  ],
+  "summary": "2-3 line test coverage overview"
+}"""
+        },
+        {
+            "role": "user",
+            "content": f"""PR Title: {metadata['title']}
+Author: {metadata['author']}
+
+Changed Files Diff:
+{diff_summary[:3000]}
+
+Related Codebase Context:
+{codebase_summary[:2000]}
+
+Sirf missing test cases find karo."""
+        }
+    ]
+
+    response = await client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        temperature=0,
+        max_tokens=1000
+    )
+
+    result = response.choices[0].message.content
+    return parse_llm_json(result, "test_coverage")
+
+
+# Orchestrator: Multi-Agent Review
+async def run_multi_agent_review(pr_url: str, token: str = None):
+    print("Gathering PR context...")
+    context = await gather_pr_context(pr_url, token)
+    
+    print("Running 3 specialist agents in parallel")
+    security, logic, test = await asyncio.gather(
+        run_security_agent(context),
+        run_logic_agent(context),
+        run_test_agent(context)
+    )
+    
+    # combining all issues
+    all_issues = (
+        security.get("issues", []) +
+        logic.get("issues", []) +
+        test.get("issues", [])
+    )
+    
+    severities = [issue.get("severity", "LOW") for issue in all_issues]
+    if "HIGH" in severities:
+        risk_level = "HIGH"
+    elif "MEDIUM" in severities:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+        
+    summary = " ".join(filter(None, [
+        security.get("summary", ""),
+        logic.get("summary", ""),
+        test.get("summmary", "")
+    ]))
+    
+    return {
+        "summary": summary,
+        "risk_level": risk_level,
+        "issues": all_issues,
+        "suggestions": [
+            f"Fix: {issue['description']}"
+            for issue in all_issues
+            if issue.get("severity") == "HIGH"
+        ],
+        "test_cases_missing": [
+            issue["description"]
+            for issue in test.get("issues", [])
+        ]
+    }
