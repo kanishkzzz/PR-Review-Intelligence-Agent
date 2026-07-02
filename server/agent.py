@@ -442,31 +442,97 @@ async def run_multi_agent_review(pr_url: str, token: str = None):
         test.get("issues", [])
     )
     
-    severities = [issue.get("severity", "LOW") for issue in all_issues]
-    if "HIGH" in severities:
-        risk_level = "HIGH"
-    elif "MEDIUM" in severities:
-        risk_level = "MEDIUM"
-    else:
-        risk_level = "LOW"
-        
-    summary = " ".join(filter(None, [
-        security.get("summary", ""),
-        logic.get("summary", ""),
-        test.get("summmary", "")
-    ]))
-    
-    return {
-        "summary": summary,
-        "risk_level": risk_level,
+    draft_review = {
+        "summary": " ".join(filter(None, [
+            security.get("summary", ""),
+            logic.get("summary", ""),
+            test.get("summary", "")
+        ])),
+        "risk_level": "HIGH" if any(
+            i.get("severity") == "HIGH" for i in all_issues
+        ) else "MEDIUM",
         "issues": all_issues,
-        "suggestions": [
-            f"Fix: {issue['description']}"
-            for issue in all_issues
-            if issue.get("severity") == "HIGH"
-        ],
+        "suggestions": [],
         "test_cases_missing": [
-            issue["description"]
-            for issue in test.get("issues", [])
+            i["description"] for i in test.get("issues", [])
         ]
     }
+
+    # ✅ Self-Critique Loop
+    print("🔍 Running critic agent...")
+    critique = await run_critic_agent(draft_review, context)
+    
+    # Critic ka refined output use karo
+    final_issues = critique.get("approved_issues", all_issues)
+    
+    return {
+        "summary": critique.get("final_summary", draft_review["summary"]),
+        "risk_level": critique.get("final_risk_level", draft_review["risk_level"]),
+        "issues": final_issues,
+        "suggestions": [
+            f"Fix: {i['description']}"
+            for i in final_issues
+            if i.get("severity") == "HIGH"
+        ],
+        "test_cases_missing": [
+            i["description"]
+            for i in final_issues
+            if i.get("type") == "MISSING_TEST"
+        ]
+    }
+
+    
+async def run_critic_agent(draft_review: dict, context: dict):
+    diff_summary = json.dumps(context["diff"], indent=2)
+    draft = json.dumps(draft_review, indent=2)
+    
+    messages = [
+        {
+            "role": "system",
+            "content": """ Tu ek strict senior engineering manager hai.
+            Tujhe ek AI agent ka draft code review evaluate karna hai.
+            
+            Yeh check karo har issue ke liye:
+            1. Kya yeh issue actually exist karta hai diff mein? (False positive toh nahi?)
+            2. Kya severity sahi hai? (Low ko High toh nahi bola?)
+            3. Kya description accurate hai?
+            4. Koi important issue miss toh nahi hua?
+            
+            Output SIRF JSON mein de, koi extra bakchodi nahi:
+            {
+                "approved_issues": [
+                    {
+                        "type": "SECURITY/LOGIC/MISSING_TEST",
+                        "severity": "HIGH/MEDIUM/LOW",
+                        "file": "filename",
+                        "description": "refined description"
+                    }
+                ],
+                "removed_issues": ["reason 1", "reason 2"],
+                "added_issues": [].
+                "final_summary": "refined 2-3 lines summary".
+                "final_risk_level": "HIGH/MEDIUM/LOW"
+            }"""
+        },
+        {
+            "role": "user",
+            "content": f"""Draft Review:
+            {draft}
+            
+            Actual PR Diff (gorund truth):
+            {diff_summary[:3000]}
+            
+            Is draft review ko validate karo -
+            false positives hata, severity fix karo"""
+        }
+    ]
+    response = await client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        temperature=0,
+        max_tokens=1000
+    )
+    
+    result = response.choices[0].message.content
+    return parse_llm_json(result, "critic")
+

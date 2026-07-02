@@ -1,6 +1,8 @@
 # Environment files
 .env
 **/.env
+server/.env
+client/.env
 
 # Python
 venv/
@@ -12,7 +14,7 @@ __pycache__/
 # VSCode
 .vscode/
 
-# Node (if client uses it)
+# Node
 node_modules/
 **/node_modules/
 dist/
@@ -20,3 +22,10 @@ build/
 
 # OS
 .DS_Store
+
+#Ngrok
+server/ngrok.exe
+&.exe
+
+#ChromaDB
+server/chroma-db/
