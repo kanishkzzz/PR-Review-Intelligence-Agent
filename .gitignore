@@ -25,7 +25,7 @@ build/
 
 #Ngrok
 server/ngrok.exe
-&.exe
+*.exe
 
 #ChromaDB
 server/chroma-db/
