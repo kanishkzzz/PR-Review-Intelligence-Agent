@@ -7,6 +7,8 @@ from rag import index_repo
 from tools import fetch_pr_diff, parse_pr_url
 import httpx
 import os
+from fastapi.responses import StreamingResponse
+import json
 
 load_dotenv()
 
@@ -21,27 +23,34 @@ app.add_middleware(
 )
 
 
-@app.post("/review", response_model=PRReviewResponse)
+@app.post("/review")
 async def review_pr(request: PRReviewRequest):
-    try:
-        owner, repo, pr_number = parse_pr_url(request.pr_url)
-        repo_full_name = f"{owner}/{repo}"
-        
-        diff = await fetch_pr_diff(request.pr_url, request.token)
-        changed_files = [f["filename"] for f in diff]
-        
-        print(f" Changed Files: {changed_files}")
-        
-        await index_repo(repo_full_name, changed_files, request.token)
-        
-        review = await run_multi_agent_review(request.pr_url, request.token)
-        return review
+    async def event_stream():
+        try:
+            owner, repo, pr_number = parse_pr_url(request.pr_url)
+            repo_full_name = f"{owner}/{repo}"
+            
+            diff = await fetch_pr_diff(request.pr_url, request.token)
+            changed_files = [f["filename"] for f in diff]
+            await index_repo(repo_full_name, changed_files, request.token)
+            
+            async for chunk in run_multi_agent_review(request.pr_url, request.token):
+                yield f"data: {json.dumps(chunk)}\n\n"
+                
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
     
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
     
     
 @app.post("/webhook")

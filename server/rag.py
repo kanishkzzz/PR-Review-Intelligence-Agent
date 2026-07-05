@@ -49,35 +49,27 @@ def chunk_code(content: str, file_path: str):
 
 #Indexing the Report
 async def index_repo(repo_full_name: str, file_paths: list, token: str = None):
- """
- Saari files fetch karo aur ChromaDB mein store karo
- """
- print(f"Indexing {len(file_paths)} files...")
- 
- for file_path in file_paths:
-   #File content fetch karo
-   content = await fetch_file_context(repo_full_name, file_path, token)
-   
-   #Skip karo agar binary ya error hai
-   if content.startswith("[Skipped]") or content.startswith("[File not"):
-     continue
-   
-   #Chunks banao - har 50 lines ek chunk
-   chunks = chunk_code(content, file_path)
-   
-   for i, chunk in enumerate(chunks):
-     #Embedding banao
-      embedding = embedder.encode(chunk).tolist()
-     
-     # ChromaDB mein store karo
-      collection.upsert(
-       ids=[f"{file_path}_{i}"],
-       embeddings = [embedding],
-       documents=[chunk],
-       metadatas=[{"file": file_path, "chunk_index":i}]
-     )
-     
- print(f"Indexing Complete")
+    print(f"Indexing {len(file_paths)} files...")
+    
+    for file_path in file_paths:
+        content = await fetch_file_context(repo_full_name, file_path, token)
+        
+        if content.startswith("[Skipped]") or content.startswith("[File not"):
+            continue
+        
+        chunks = chunk_code(content, file_path)
+        
+        for i, chunk in enumerate(chunks):
+            embedding = embedder.encode(chunk).tolist()
+            
+            collection.upsert(
+                ids=[f"{file_path}_{i}"],
+                embeddings=[embedding],
+                documents=[chunk],
+                metadatas=[{"file": file_path, "chunk_index": i}]
+            )
+    
+    print("Indexing Complete")
  
  
 # #Code ko chunks ma todenge
