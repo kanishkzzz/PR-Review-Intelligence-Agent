@@ -1,112 +1,144 @@
 <div align="center">
 
-# 🤖 PR Review Intelligence Agent
+<img src="https://img.shields.io/badge/BugBeGone-AI%20PR%20Reviewer-6366f1?style=for-the-badge&logo=github&logoColor=white" alt="BugBeGone"/>
 
-**A multi-agent AI system that reviews GitHub Pull Requests automatically — catching security issues, bugs, and missing tests before a human ever looks at the diff.**
+# 🤖 BugBeGone
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](https://react.dev/)
-[![Vite](https://img.shields.io/badge/Vite-646CFF?style=for-the-badge&logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Groq](https://img.shields.io/badge/Groq-F55036?style=for-the-badge)](https://groq.com/)
-[![ChromaDB](https://img.shields.io/badge/ChromaDB-6C3EF4?style=for-the-badge)](https://www.trychroma.com/)
+### Multi-agent AI that reviews your Pull Requests before humans do.
 
-[Live Demo](https://pr-review-intelligence-agent.vercel.app) · [Report Bug](../../issues) · [Request Feature](../../issues)
+The moment a PR is opened — three specialized AI agents run in parallel, catching security vulnerabilities, logic bugs, and missing tests. Structured review posted as a GitHub comment. Zero manual steps.
+
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-20232A?style=flat-square&logo=react&logoColor=61DAFB)](https://react.dev/)
+[![ChromaDB](https://img.shields.io/badge/ChromaDB-6C3EF4?style=flat-square)](https://www.trychroma.com/)
+[![GitHub Models](https://img.shields.io/badge/GitHub%20Models-GPT--4o-181717?style=flat-square&logo=github)](https://github.com/marketplace/models)
+[![Render](https://img.shields.io/badge/Deployed%20on-Render-46E3B7?style=flat-square)](https://render.com/)
+
+**[Live Demo](https://pr-review-intelligence-agent.vercel.app)** · **[Report Bug](../../issues)** · **[Request Feature](../../issues)**
+
+---
+
+![BugBeGone Dashboard](./bugbegone-screenshot.png)
 
 </div>
 
 ---
 
-## 📖 Overview
+## What it does
 
-PR Review Intelligence Agent plugs directly into GitHub via webhooks. The moment a Pull Request is opened or updated, three specialized AI agents run **in parallel** — a Security agent, a Logic/Bug agent, and a Test Coverage agent — and post a structured, actionable review as a PR comment within seconds.
+You open a PR. BugBeGone immediately:
 
-No more waiting for a human reviewer to notice the SQL injection risk buried in file #7 of a 40-file diff.
+1. Fetches the diff and indexes the affected files into a vector store
+2. Runs three specialist agents **in parallel** — each focused on one concern
+3. A critic agent validates the findings — removing false positives, correcting severity
+4. Posts a structured review comment directly on your PR
 
-## ✨ Features
+No polling. No waiting. Just open the PR and the review appears.
 
-- **🔍 Multi-Agent Analysis** — Security, Logic/Bug, and Test Coverage agents run concurrently via `asyncio.gather()`
-- **🧠 RAG-Powered Context** — ChromaDB + `all-MiniLM-L6-v2` embeddings give agents function-level code context, not just the raw diff
-- **⚡ Fast Inference** — Powered by Groq's `llama-3.3-70b-versatile` for near-instant reviews
-- **🪝 GitHub Webhook Integration** — Fully automated: opens a PR, get a review comment — zero manual steps
-- **🎯 Structured Output** — Risk level, categorized issues, actionable suggestions, and missing test cases
-- **🖥️ Standalone Dashboard** — Manually trigger and inspect reviews from a clean web UI
+---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-GitHub PR Event
-      │
-      ▼
- Webhook Listener (FastAPI)
-      │
-      ▼
- Fetch PR Diff + Changed Files
-      │
-      ▼
- Index Repo Context → ChromaDB (RAG)
-      │
-      ▼
-   ┌──────────────┬──────────────┬──────────────┐
-   │              │              │              
-   ▼              ▼              ▼              
-Security      Logic/Bug     Test Coverage    (parallel via
- Agent          Agent           Agent         asyncio.gather)
-   │              │              │
-   └──────────────┴──────────────┘
-                  │
-                  ▼
-        Aggregate + Post GitHub Comment
+GitHub PR opened / updated
+           │
+           ▼
+   FastAPI Webhook Listener
+           │
+    ┌──────┴──────┐
+    │             │
+    ▼             ▼
+Fetch PR Diff   Index changed files
+                → ChromaDB (RAG)
+                → text-embedding-3-small
+    │
+    ▼
+asyncio.gather() — 3 agents in parallel
+    │
+  ┌─┴──────────────┬──────────────────┐
+  ▼                ▼                  ▼
+Security         Logic/Bug        Test Coverage
+Agent            Agent            Agent
+  │                │                  │
+  └────────────────┴──────────────────┘
+                   │
+                   ▼
+           Critic Agent
+        (validates findings,
+         removes false positives)
+                   │
+                   ▼
+        Post GitHub PR Comment
 ```
 
-## 🛠️ Tech Stack
+---
+
+## Features
+
+| Feature | Details |
+|---|---|
+| 🔒 **Security Agent** | Hardcoded secrets, auth bypass, SQL injection, exposed keys |
+| 🐛 **Logic Agent** | Null checks, race conditions, silent error swallowing, edge cases |
+| 🧪 **Test Agent** | Missing unit tests, untested error paths, integration gaps |
+| 🎯 **Critic Agent** | Validates all findings — removes false positives, corrects severity |
+| ⚡ **Streaming Response** | Real-time status updates as agents run — no blank loading screen |
+| 🧠 **RAG Context** | ChromaDB + `text-embedding-3-small` — agents see function-level context, not just the raw diff |
+| 🪝 **Webhook Integration** | Fully automated — zero manual steps after setup |
+| 🖥️ **Web Dashboard** | Manually trigger and inspect any PR review |
+
+---
+
+## Tech Stack
 
 **Backend**
-- FastAPI · Python
-- Groq (`llama-3.3-70b-versatile`)
-- ChromaDB + Sentence Transformers (RAG)
-- GitHub REST API
+- Python · FastAPI · Uvicorn
+- GitHub Models API — `gpt-4o` (inference) + `text-embedding-3-small` (embeddings)
+- ChromaDB — vector store for RAG
+- `asyncio.gather()` — parallel agent execution
+- GitHub REST API — diff fetching + comment posting
 
 **Frontend**
 - React + Vite
 - Tailwind CSS v4
-- Motion (`motion/react`)
-- Axios · Lucide React · Recharts
+- `motion/react` — animations
+- Lucide React — icons
 
-**Infra**
-- Backend deployed on Render
-- Frontend deployed on Vercel
+**Infrastructure**
+- Backend → Render
+- Frontend → Vercel
+- Embeddings + LLM → GitHub Models (free with Student Developer Pack)
 
-## 🚀 Getting Started
+---
+
+## Getting Started
 
 ### Prerequisites
 - Python 3.11+
 - Node.js 18+
-- A [Groq API key](https://console.groq.com)
-- A GitHub Personal Access Token (`repo` scope)
+- GitHub Personal Access Token (with `repo` + `models:read` scope)
 
-### Backend Setup
+### Backend
 
 ```bash
 cd server
 python -m venv venv
-venv\Scripts\activate        # Windows
-source venv/bin/activate     # macOS/Linux
+source venv/bin/activate        # macOS/Linux
+venv\Scripts\activate           # Windows
 
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in `server/`:
+Create `server/.env`:
 ```env
-GROQ_API_KEY=your_groq_api_key
-GITHUB_TOKEN=your_github_token
+GITHUB_TOKEN=your_github_personal_access_token
 ```
 
-Run the server:
+Start the server:
 ```bash
 uvicorn main:app --reload
 ```
 
-### Frontend Setup
+### Frontend
 
 ```bash
 cd client
@@ -116,22 +148,24 @@ npm run dev
 
 Visit `http://localhost:5173`
 
-### Webhook Setup (optional, for automated reviews)
+### Webhook Setup
 
-1. Expose your local backend using [ngrok](https://ngrok.com): `ngrok http 8000`
-2. In your target repo: **Settings → Webhooks → Add webhook**
-3. Payload URL: `<your-ngrok-or-deployed-url>/webhook`
+1. Deploy backend (or expose locally via [ngrok](https://ngrok.com): `ngrok http 8000`)
+2. Go to your target repo → **Settings → Webhooks → Add webhook**
+3. Payload URL: `<your-url>/webhook`
 4. Content type: `application/json`
-5. Events: **Pull requests**
+5. Events: **Pull requests only**
 
-## 📡 API Reference
+---
+
+## API
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/review` | `POST` | Manually trigger a review for a given PR URL |
+| `/review` | `POST` | Manually trigger a review for any PR URL |
 | `/webhook` | `POST` | GitHub webhook receiver — auto-triggers on PR open/sync |
 
-**`POST /review`**
+**Request:**
 ```json
 {
   "pr_url": "https://github.com/owner/repo/pull/123",
@@ -139,19 +173,35 @@ Visit `http://localhost:5173`
 }
 ```
 
-## 🗺️ Roadmap
+**Response** (streamed as SSE):
+```
+data: {"status": "fetching", "message": "🔍 Fetching PR metadata..."}
+data: {"status": "analyzing", "message": "🤖 Running 3 agents in parallel..."}
+data: {"status": "complete", "result": { ... }}
+```
 
-- [ ] n8n workflow orchestration
+---
+
+## Roadmap
+
+- [ ] N8N workflow orchestration — Slack + email alerts on HIGH risk
+- [ ] Developer memory — track per-developer bug patterns across PRs
 - [ ] Multi-repo dashboard with review history
-- [ ] Support for GitLab / Bitbucket
-- [ ] Configurable agent rulesets per repo
+- [ ] Custom rules engine — define team-specific review rules via YAML
+- [ ] Auto-fix suggestions — agent proposes fixed code in diff format
 
-## 📄 License
+---
 
-This project is open source and available under the [MIT License](LICENSE).
+## Why not just use GitHub Copilot review?
+
+Copilot reviews one thing at a time, sequentially. BugBeGone runs specialist agents in parallel — each trained to look for one category of problem, deeply. The critic layer removes noise. The RAG layer gives agents full repo context, not just the changed lines. And it's fully open source.
 
 ---
 
 <div align="center">
-Built by <a href="https://github.com/kanishkzzz">Kanishk Negi</a>
+
+Built by [Kanishk Negi](https://github.com/kanishkzzz)
+
+*B.Tech — Applied Physics, Delhi Technological University*
+
 </div>
