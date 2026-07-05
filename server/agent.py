@@ -1,12 +1,17 @@
 import json
-from groq import AsyncGroq
+from openai import AsyncOpenAI, OpenAI
 from tools import fetch_pr_metadata, fetch_pr_diff, fetch_file_context
 from dotenv import load_dotenv
 from rag import search_similar_code
 import asyncio
 load_dotenv()
+import os
 
-client = AsyncGroq()
+client = AsyncOpenAI(
+    base_url="https://models.github.ai/inference",
+    api_key=os.getenv("GITHUB_TOKEN")
+)
+
 
 
 
@@ -151,7 +156,7 @@ Final output SIRF JSON mein dena — koi extra text nahi:
     # ── Loop ─────────────────────────────────────────────
     while True:
         response = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-4o",
             messages=messages,
             tools=TOOLS,
             temperature=0,  # structured output ke liye
@@ -275,7 +280,7 @@ Sirf security issues find karo."""
     ]
     
     response = await client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-4o",
         messages=messages,
         temperature=0.5,
         max_tokens=1000
@@ -350,7 +355,7 @@ async def run_logic_agent(context: dict):
     ]
     
     response = await client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-4o",
         messages=messages,
         temperature=0,
         max_tokens=1000
@@ -413,7 +418,7 @@ Sirf missing test cases find karo."""
     ]
 
     response = await client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-4o",
         messages=messages,
         temperature=0,
         max_tokens=1000
@@ -425,17 +430,28 @@ Sirf missing test cases find karo."""
 
 # Orchestrator: Multi-Agent Review
 async def run_multi_agent_review(pr_url: str, token: str = None):
-    print("Gathering PR context...")
+    # Step 1
+    yield {"status": "fetching", "message": "🔍 Fetching PR metadata..."}
     context = await gather_pr_context(pr_url, token)
     
-    print("Running 3 specialist agents in parallel")
+    # Step 2
+    yield {"status": "indexing", "message": f"📁 Indexing {len(context['diff'])} files..."}
+    
+    # Step 3
+    yield {"status": "analyzing", "message": "🤖 Running 3 agents in parallel..."}
     security, logic, test = await asyncio.gather(
         run_security_agent(context),
         run_logic_agent(context),
         run_test_agent(context)
     )
     
-    # combining all issues
+    yield {"status": "security_done", "message": f"🔒 Security: {len(security.get('issues', []))} issues found"}
+    yield {"status": "logic_done", "message": f"🐛 Logic: {len(logic.get('issues', []))} issues found"}
+    yield {"status": "test_done", "message": f"🧪 Tests: {len(test.get('issues', []))} issues found"}
+    
+    # Step 4
+    yield {"status": "critic", "message": "🎯 Critic agent validating..."}
+    
     all_issues = (
         security.get("issues", []) +
         logic.get("issues", []) +
@@ -457,28 +473,29 @@ async def run_multi_agent_review(pr_url: str, token: str = None):
             i["description"] for i in test.get("issues", [])
         ]
     }
-
-    # ✅ Self-Critique Loop
-    print("🔍 Running critic agent...")
-    critique = await run_critic_agent(draft_review, context)
     
-    # Critic ka refined output use karo
+    critique = await run_critic_agent(draft_review, context)
     final_issues = critique.get("approved_issues", all_issues)
     
-    return {
-        "summary": critique.get("final_summary", draft_review["summary"]),
-        "risk_level": critique.get("final_risk_level", draft_review["risk_level"]),
-        "issues": final_issues,
-        "suggestions": [
-            f"Fix: {i['description']}"
-            for i in final_issues
-            if i.get("severity") == "HIGH"
-        ],
-        "test_cases_missing": [
-            i["description"]
-            for i in final_issues
-            if i.get("type") == "MISSING_TEST"
-        ]
+    # Step 5 — final result
+    yield {
+        "status": "complete",
+        "message": "✅ Review complete!",
+        "result": {
+            "summary": critique.get("final_summary", draft_review["summary"]),
+            "risk_level": critique.get("final_risk_level", draft_review["risk_level"]),
+            "issues": final_issues,
+            "suggestions": [
+                f"Fix: {i['description']}"
+                for i in final_issues
+                if i.get("severity") == "HIGH"
+            ],
+            "test_cases_missing": [
+                i["description"]
+                for i in final_issues
+                if i.get("type") == "MISSING_TEST"
+            ]
+        }
     }
 
     
@@ -527,7 +544,7 @@ async def run_critic_agent(draft_review: dict, context: dict):
         }
     ]
     response = await client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-4o",
         messages=messages,
         temperature=0,
         max_tokens=1000
