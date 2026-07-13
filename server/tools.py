@@ -1,6 +1,7 @@
 import httpx
 import re
 import base64
+import asyncio
 
 TEXT_EXTENSIONS = [
     ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css",
@@ -24,7 +25,7 @@ async def fetch_pr_metadata(pr_url: str, token: str):
     if token and token.strip():
       khopda["Authorization"] = f"bearer {token}"
       
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
       jawaab = await client.get(
         f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
         headers = khopda
@@ -53,7 +54,7 @@ async def fetch_pr_diff(pr_url: str, token: str=None):
   if token and token.strip():
     khopda["Authorization"] = f"bearer {token}"
   
-  async with httpx.AsyncClient() as client:
+  async with httpx.AsyncClient(timeout=30.0) as client:
     response = await client.get(
       f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files",
       headers = khopda
@@ -75,20 +76,28 @@ async def fetch_pr_diff(pr_url: str, token: str=None):
       for f in files
     ]
     
-async def fetch_file_context(repo_full_name: str, file_path: str, token: str = None):
+async def fetch_file_context(repo_full_name: str, file_path: str, token: str = None, retries: int = 2):
   if not any(file_path.endswith(ext) for ext in TEXT_EXTENSIONS):
     return f"[Skipped: binary or Unsupported file type: {file_path}]"
   
   khopda = {"Accept": "application/vnd.github+json"}
   if token and token.strip():
     khopda["Authorization"] = f"Bearer {token}"
-    
-  async with httpx.AsyncClient() as client:
-    response = await client.get(
-      f"https://api.github.com/repos/{repo_full_name}/contents/{file_path}",
-      headers = khopda
-    )
-  
+
+  response = None
+  for attempt in range(retries + 1):
+    try:
+      async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+          f"https://api.github.com/repos/{repo_full_name}/contents/{file_path}",
+          headers = khopda
+        )
+      break
+    except httpx.ReadTimeout:
+      if attempt == retries:
+        return f"[Skipped: timed out fetching {file_path}]"
+      await asyncio.sleep(2)
+
   if response.status_code != 200:
     return (f"File not found or deleted: {file_path}")
   
@@ -100,8 +109,3 @@ async def fetch_file_context(repo_full_name: str, file_path: str, token: str = N
     return "\n".join(lines[:100]) 
   except UnicodeDecodeError:
     return f"[Skipped: Unable to decode content of {file_path}]"
-  
-  return content
-  
-  
-  

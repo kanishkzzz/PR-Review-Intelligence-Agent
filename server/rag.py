@@ -1,31 +1,24 @@
 import os
 import chromadb
 from tools import fetch_file_context
-from openai import OpenAI
+from sentence_transformers import SentenceTransformer
 
 #setup
 chroma_client = chromadb.PersistentClient(path="./chroma-db")
 collection = chroma_client.get_or_create_collection(name="repo_index")
 
+_local_model = None
 
-#Github Models embedding model
-_embedding_client = None
+def get_local_embedding_model():
+    global _local_model
+    if _local_model is None:
+        _local_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _local_model
 
-def get_embedding_client():
-    global _embedding_client
-    if _embedding_client is None:
-        _embedding_client = OpenAI(
-            base_url="https://models.github.ai/inference",
-            api_key=os.getenv("GITHUB_TOKEN")
-        )
-    return _embedding_client
 
 def get_embedding(text: str) -> list:
-    response = get_embedding_client().embeddings.create(
-        model="text-embedding-3-small",
-        input=text[:8000]
-    )
-    return response.data[0].embedding
+    model = get_local_embedding_model()
+    return model.encode(text[:8000]).tolist()
 
 def chunk_code(content: str, file_path: str):
     lines = content.split("\n")
@@ -61,70 +54,73 @@ def chunk_code(content: str, file_path: str):
             chunks.append(f"# File: {file_path}\n{chunk_text}")
 
     return chunks  
-    
+
+def get_embeddings_batch(texts: list) -> list:
+    model = get_local_embedding_model()
+    truncated = [t[:8000] for t in texts]
+    embeddings = model.encode(truncated)
+    return [e.tolist() for e in embeddings]
+
 
 #Indexing the Report
 async def index_repo(repo_full_name: str, file_paths: list, token: str = None):
     print(f"Indexing {len(file_paths)} files...")
-    
+
+    all_chunks = []
+    all_ids = []
+    all_metadatas = []
+
     for file_path in file_paths:
+        # Check if this file is already indexed — skip re-fetching/re-embedding
+        existing = collection.get(where={"file": file_path})
+        if existing["ids"]:
+            print(f"Skipping already-indexed file: {file_path}")
+            continue
+
         content = await fetch_file_context(repo_full_name, file_path, token)
-        
+
         if content.startswith("[Skipped]") or content.startswith("[File not"):
             continue
-        
+
         chunks = chunk_code(content, file_path)
-        
         for i, chunk in enumerate(chunks):
-            embedding = get_embedding(chunk)
-            
-            collection.upsert(
-                ids=[f"{file_path}_{i}"],
-                embeddings=[embedding],
-                documents=[chunk],
-                metadatas=[{"file": file_path, "chunk_index": i}]
-            )
-    
+            all_chunks.append(chunk)
+            all_ids.append(f"{file_path}_{i}")
+            all_metadatas.append({"file": file_path, "chunk_index": i})
+
+    if not all_chunks:
+        print("No new chunks to index")
+        return
+
+    BATCH_SIZE = 20
+    for start in range(0, len(all_chunks), BATCH_SIZE):
+        batch_chunks = all_chunks[start:start + BATCH_SIZE]
+        batch_ids = all_ids[start:start + BATCH_SIZE]
+        batch_metadatas = all_metadatas[start:start + BATCH_SIZE]
+
+        embeddings = get_embeddings_batch(batch_chunks)
+
+        collection.upsert(
+            ids=batch_ids,
+            embeddings=embeddings,
+            documents=batch_chunks,
+            metadatas=batch_metadatas
+        )
+
     print("Indexing Complete")
  
- 
-# #Code ko chunks ma todenge
-# def chunk_code(content: str, file_path: str, chunk_size: int = 50):
-#   """
-#   File ko 50-line chunks ma todo
-#   """
-#   lines = content.split("\n")
-#   chunks = []
   
-#   for i in range(0, len(lines), chunk_size):
-#     chunk = "\n".join(lines[i:i + chunk_size])
-#     if chunk.strip():
-#       chunks.append(f"# {file_path}\n{chunk}")
-  
-#   return chunks
-
-def search_similar_code(query: str, n_results: int = 3):
-  """
-  Query ke basis pe similar code chunks dhundho
-  """
-  
-  # Query ki embedding krna
-  query_embedding = get_embedding(query)
-  
-  #ChromaDB mein search karo
-  results = collection.query(
-    query_embeddings=[query_embedding],
-    n_results=n_results
-  )
-  
-  #Clean format mein return karo
-  similar_chunks = []
-  for i, doc in enumerate(results["documents"][0]):
-    similar_chunks.append({
-      "content":doc,
-      "file": results["metadatas"][0][i]["file"],
-      "score": results["distances"][0][i]
-    })
-    
-  return similar_chunks
-  
+def search_similar_code_batch(queries: list, n_results: int = 2):
+    embeddings = get_embeddings_batch(queries)  # one API call for all filenames
+    results_map = {}
+    for query, embedding in zip(queries, embeddings):
+        results = collection.query(query_embeddings=[embedding], n_results=n_results)
+        similar_chunks = []
+        for i, doc in enumerate(results["documents"][0]):
+            similar_chunks.append({
+                "content": doc,
+                "file": results["metadatas"][0][i]["file"],
+                "score": results["distances"][0][i]
+            })
+        results_map[query] = similar_chunks
+    return results_map

@@ -1,89 +1,99 @@
 import json
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, RateLimitError
 from tools import fetch_pr_metadata, fetch_pr_diff, fetch_file_context
 from dotenv import load_dotenv
-from rag import search_similar_code
 import asyncio
 load_dotenv()
 import os
+from lmnr import observe
+from rag import search_similar_code_batch
 
 client = AsyncOpenAI(
     base_url="https://models.github.ai/inference",
     api_key=os.getenv("GITHUB_TOKEN")
 )
 
+async def call_with_retry(coro_fn, *args, max_retries=3, **kwargs):
+    for attempt in range(max_retries):
+        try:
+            return await coro_fn(*args, **kwargs)
+        except RateLimitError:
+            if attempt == max_retries - 1:
+                raise
+            wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+            print(f"Rate limited, retrying in {wait}s...")
+            await asyncio.sleep(wait)
 
 
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_pr_metadata",
-            "description": "PR ka title, author, description, state fetch karta hai",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pr_url": {"type": "string", "description": "GitHub PR URL"}
-                },
-                "required": ["pr_url"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_pr_diff",
-            "description": "PR mein kya kya changes hue — file wise diff fetch karta hai",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pr_url": {"type": "string", "description": "GitHub PR URL"}
-                },
-                "required": ["pr_url"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_file_context",
-            "description": "Kisi specific file ka poora content fetch karta hai",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "repo_full_name": {
-                        "type": "string",
-                        "description": "owner/repo format mein"
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "File ka path jaise src/auth.js"
-                    }
-                },
-                "required": ["repo_full_name", "file_path"]
-            }
-        }
-    },
-    # TOOLS list mein add karo
-    {
-        "type": "function",
-        "function": {
-            "name": "search_codebase",
-            "description": "Poori repo mein similar code dhundho — impact analysis ke liye",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Kya dhundhna hai — function name ya concept"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    }    
-]
+# TOOLS = [
+#     {
+#         "type": "function",
+#         "function": {
+#             "name": "fetch_pr_metadata",
+#             "description": "PR ka title, author, description, state fetch karta hai",
+#             "parameters": {
+#                 "type": "object",
+#                 "properties": {
+#                     "pr_url": {"type": "string", "description": "GitHub PR URL"}
+#                 },
+#                 "required": ["pr_url"]
+#             }
+#         }
+#     },
+#     {
+#         "type": "function",
+#         "function": {
+#             "name": "fetch_pr_diff",
+#             "description": "PR mein kya kya changes hue — file wise diff fetch karta hai",
+#             "parameters": {
+#                 "type": "object",
+#                 "properties": {
+#                     "pr_url": {"type": "string", "description": "GitHub PR URL"}
+#                 },
+#                 "required": ["pr_url"]
+#             }
+#         }
+#     },
+#     {
+#         "type": "function",
+#         "function": {
+#             "name": "fetch_file_context",
+#             "description": "Kisi specific file ka poora content fetch karta hai",
+#             "parameters": {
+#                 "type": "object",
+#                 "properties": {
+#                     "repo_full_name": {
+#                         "type": "string",
+#                         "description": "owner/repo format mein"
+#                     },
+#                     "file_path": {
+#                         "type": "string",
+#                         "description": "File ka path jaise src/auth.js"
+#                     }
+#                 },
+#                 "required": ["repo_full_name", "file_path"]
+#             }
+#         }
+#     },
+#     # TOOLS list mein add karo
+#     {
+#         "type": "function",
+#         "function": {
+#             "name": "search_codebase",
+#             "description": "Poori repo mein similar code dhundho — impact analysis ke liye",
+#             "parameters": {
+#                 "type": "object",
+#                 "properties": {
+#                     "query": {
+#                         "type": "string",
+#                         "description": "Kya dhundhna hai — function name ya concept"
+#                     }
+#                 },
+#                 "required": ["query"]
+#             }
+#         }
+#     }    
+# ]
 
 # ── Helper: Clean JSON from LLM response ──────────────────
 def parse_llm_json(result: str, agent_name: str):
@@ -98,122 +108,125 @@ def parse_llm_json(result: str, agent_name: str):
     except json.JSONDecodeError:
         return {"agent": agent_name, "raw": result, "issues": []}
 
-async def run_tool(tool_name: str, tool_args: dict, token: str = None):
-    if tool_name == "fetch_pr_metadata":
-        return await fetch_pr_metadata(tool_args["pr_url"], token)
-    elif tool_name == "fetch_pr_diff":
-        return await fetch_pr_diff(tool_args["pr_url"], token)
-    elif tool_name == "fetch_file_context":
-        return await fetch_file_context(
-            tool_args["repo_full_name"],
-            tool_args["file_path"],
-            token
-        )
-    elif tool_name == "search_codebase":   
-        return search_similar_code(tool_args["query"])
-    else:
-        raise ValueError(f"Unknown tool: {tool_name}")
+# async def run_tool(tool_name: str, tool_args: dict, token: str = None):
+#     if tool_name == "fetch_pr_metadata":
+#         return await fetch_pr_metadata(tool_args["pr_url"], token)
+#     elif tool_name == "fetch_pr_diff":
+#         return await fetch_pr_diff(tool_args["pr_url"], token)
+#     elif tool_name == "fetch_file_context":
+#         return await fetch_file_context(
+#             tool_args["repo_full_name"],
+#             tool_args["file_path"],
+#             token
+#         )
+#     elif tool_name == "search_codebase":   
+#         return search_similar_code(tool_args["query"])
+#     else:
+#         raise ValueError(f"Unknown tool: {tool_name}")
       
-async def run_agent(pr_url: str, token: str = None):
-    messages = [
-        {
-    "role": "system",
-    "content": """Tu ek senior software engineer hai.
-Tera kaam hai GitHub PR ko deeply review karna.
+# async def run_agent(pr_url: str, token: str = None):
+#     messages = [
+#         {
+#     "role": "system",
+#     "content": """Tu ek senior software engineer hai.
+# Tera kaam hai GitHub PR ko deeply review karna.
 
-Hamesha yeh EXACT order follow kar:
-1. fetch_pr_metadata call kar
-2. fetch_pr_diff call kar
-3. Har changed file ke liye search_codebase call kar — 
-   yeh batayega ki woh code aur kahan use ho raha hai
-4. Suspicious files ke liye fetch_file_context call kar
+# Hamesha yeh EXACT order follow kar:
+# 1. fetch_pr_metadata call kar
+# 2. fetch_pr_diff call kar
+# 3. Har changed file ke liye search_codebase call kar — 
+#    yeh batayega ki woh code aur kahan use ho raha hai
+# 4. Suspicious files ke liye fetch_file_context call kar
 
-Review mein yeh check karna hai:
-- Security issues (exposed keys, auth bypass, injection)
-- Logic bugs (null checks, edge cases)
-- Breaking changes — search_codebase se pata chalega
-  ki changed code kitni jagah use ho raha hai
-- Code quality
-- Missing tests
+# Review mein yeh check karna hai:
+# - Security issues (exposed keys, auth bypass, injection)
+# - Logic bugs (null checks, edge cases)
+# - Breaking changes — search_codebase se pata chalega
+#   ki changed code kitni jagah use ho raha hai
+# - Code quality
+# - Missing tests
 
-Final output SIRF JSON mein dena — koi extra text nahi:
-{
-  "summary": "...",
-  "risk_level": "HIGH/MEDIUM/LOW",
-  "issues": [
-    {"type": "SECURITY", "file": "...", "description": "..."}
-  ],
-  "suggestions": ["..."],
-  "test_cases_missing": ["..."]
-}"""
-},
-        {
-            "role": "user",
-            "content": f"Is PR ko review karo: {pr_url}"
-        }
-    ]
+# Final output SIRF JSON mein dena — koi extra text nahi:
+# {
+#   "summary": "...",
+#   "risk_level": "HIGH/MEDIUM/LOW",
+#   "issues": [
+#     {"type": "SECURITY", "file": "...", "description": "..."}
+#   ],
+#   "suggestions": ["..."],
+#   "test_cases_missing": ["..."]
+# }"""
+# },
+#         {
+#             "role": "user",
+#             "content": f"Is PR ko review karo: {pr_url}"
+#         }
+#     ]
 
-    # ── Loop ─────────────────────────────────────────────
-    while True:
-        response = await client.chat.completions.create(
-            model="openai/gpt-4o",
-            messages=messages,
-            tools=TOOLS,
-            temperature=0,  # structured output ke liye
-            max_tokens=1000
-        )
+#     # ── Loop ─────────────────────────────────────────────
+#     while True:
+#         response = await call_with_retry(
+#             client.chat.completions.create,
+#             model="openai/gpt-4o",
+#             messages=messages,
+#             tools=TOOLS,
+#             temperature=0,  # structured output ke liye
+#             max_tokens=1000
+#         )
 
-        message = response.choices[0].message
+#         message = response.choices[0].message
 
-        # Case A: LLM ne tool manga
-        if message.tool_calls:
-            # Assistant ka message history mein add karo
-            messages.append(message)
+#         # Case A: LLM ne tool manga
+#         if message.tool_calls:
+#             # Assistant ka message history mein add karo
+#             messages.append(message)
 
-            # Har tool call run karo
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
+#             # Har tool call run karo
+#             for tool_call in message.tool_calls:
+#                 tool_name = tool_call.function.name
+#                 tool_args = json.loads(tool_call.function.arguments)
 
-                print(f"🔧 Tool call: {tool_name} — {tool_args}")
+#                 print(f"🔧 Tool call: {tool_name} — {tool_args}")
 
-                result = await run_tool(tool_name, tool_args, token)
+#                 result = await run_tool(tool_name, tool_args, token)
 
-                # Result history mein add karo
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(result)
-                })
+#                 # Result history mein add karo
+#                 messages.append({
+#                     "role": "tool",
+#                     "tool_call_id": tool_call.id,
+#                     "content": json.dumps(result)
+#                 })
 
-        # Case B: LLM ne final answer diya — loop khatam
-        else:
-            final_review = message.content
-            print("✅ Review ready!")
+#         # Case B: LLM ne final answer diya — loop khatam
+#         else:
+#             final_review = message.content
+#             print("✅ Review ready!")
 
-            # JSON parse karo
-            try:
-                return json.loads(final_review)
-            except json.JSONDecodeError:
-                return {"raw_review": final_review}
-            
-async def gather_pr_context(pr_url: str, token: str = None):
+#             # JSON parse karo
+#             try:
+#                 return json.loads(final_review)
+#             except json.JSONDecodeError:
+#                 return {"raw_review": final_review}
+   
+@observe(name="gather_pr_context")         
+async def gather_pr_context(pr_url: str, token: str = None, diff: list = None):
     """
     Saara data ek baar mein gather karta hai —
     teeno specialist agents isi data ko use karenge
     """
     metadata = await fetch_pr_metadata(pr_url, token)
-    diff = await fetch_pr_diff(pr_url, token)
+    
+    if diff is None:
+        diff = await fetch_pr_diff(pr_url, token)
 
-    # Har changed file ke liye codebase context dhundo
-    codebase_context = []
-    for file in diff:
-        filename = file["filename"]
-        results = search_similar_code(filename, n_results=2)
-        codebase_context.append({
-            "file": filename,
-            "related_code": results
-        })
+    # Ek hi call mein saari filenames ki embeddings + search
+    filenames = [file["filename"] for file in diff]
+    search_results = search_similar_code_batch(filenames, n_results=2)
+
+    codebase_context = [
+        {"file": filename, "related_code": search_results[filename]}
+        for filename in filenames
+    ]
 
     return {
         "metadata": metadata,
@@ -222,6 +235,7 @@ async def gather_pr_context(pr_url: str, token: str = None):
     }
 
 # Specialist Agent 1: Security Chief
+@observe(name="security_agent")
 async def run_security_agent(context: dict):
     """
     Sirf security issues dhundhta hai - expose keys, auth bypass, injection,
@@ -279,7 +293,8 @@ Sirf security issues find karo."""
         }
     ]
     
-    response = await client.chat.completions.create(
+    response = await call_with_retry(
+        client.chat.completions.create,
         model="openai/gpt-4o",
         messages=messages,
         temperature=0.5,
@@ -299,6 +314,7 @@ Sirf security issues find karo."""
         return {"agent": "security", "raw": result, "issues":[]}
     
 #2 Logical Bugs Specialist
+@observe(name="logic_agent")
 async def run_logic_agent(context: dict):
     """
     Sirf Logical bugs aur edge cases dhoondhta hai
@@ -354,7 +370,8 @@ async def run_logic_agent(context: dict):
         }
     ]
     
-    response = await client.chat.completions.create(
+    response = await call_with_retry(
+        client.chat.completions.create,
         model="openai/gpt-4o",
         messages=messages,
         temperature=0,
@@ -366,6 +383,7 @@ async def run_logic_agent(context: dict):
 
 
 #3 Test Cases Specialist
+@observe(name="test_agent")
 async def run_test_agent(context: dict):
     """
     Sirf missing test cases dhundta hai
@@ -417,7 +435,8 @@ Sirf missing test cases find karo."""
         }
     ]
 
-    response = await client.chat.completions.create(
+    response = await call_with_retry(
+        client.chat.completions.create,
         model="openai/gpt-4o",
         messages=messages,
         temperature=0,
@@ -429,35 +448,22 @@ Sirf missing test cases find karo."""
 
 
 # Orchestrator: Multi-Agent Review
-async def run_multi_agent_review(pr_url: str, token: str = None):
-    # Step 1
-    yield {"status": "fetching", "message": "🔍 Fetching PR metadata..."}
-    context = await gather_pr_context(pr_url, token)
-    
-    # Step 2
-    yield {"status": "indexing", "message": f"📁 Indexing {len(context['diff'])} files..."}
-    
-    # Step 3
-    yield {"status": "analyzing", "message": "🤖 Running 3 agents in parallel..."}
+@observe(name="multi_agent_review")
+async def run_multi_agent_review(pr_url: str, token: str = None, diff: list = None):
+    context = await gather_pr_context(pr_url, token, diff=diff)
+
     security, logic, test = await asyncio.gather(
         run_security_agent(context),
         run_logic_agent(context),
         run_test_agent(context)
     )
-    
-    yield {"status": "security_done", "message": f"🔒 Security: {len(security.get('issues', []))} issues found"}
-    yield {"status": "logic_done", "message": f"🐛 Logic: {len(logic.get('issues', []))} issues found"}
-    yield {"status": "test_done", "message": f"🧪 Tests: {len(test.get('issues', []))} issues found"}
-    
-    # Step 4
-    yield {"status": "critic", "message": "🎯 Critic agent validating..."}
-    
+
     all_issues = (
         security.get("issues", []) +
         logic.get("issues", []) +
         test.get("issues", [])
     )
-    
+
     draft_review = {
         "summary": " ".join(filter(None, [
             security.get("summary", ""),
@@ -473,32 +479,27 @@ async def run_multi_agent_review(pr_url: str, token: str = None):
             i["description"] for i in test.get("issues", [])
         ]
     }
-    
+
     critique = await run_critic_agent(draft_review, context)
     final_issues = critique.get("approved_issues", all_issues)
-    
-    # Step 5 — final result
-    yield {
-        "status": "complete",
-        "message": "✅ Review complete!",
-        "result": {
-            "summary": critique.get("final_summary", draft_review["summary"]),
-            "risk_level": critique.get("final_risk_level", draft_review["risk_level"]),
-            "issues": final_issues,
-            "suggestions": [
-                f"Fix: {i['description']}"
-                for i in final_issues
-                if i.get("severity") == "HIGH"
-            ],
-            "test_cases_missing": [
-                i["description"]
-                for i in final_issues
-                if i.get("type") == "MISSING_TEST"
-            ]
-        }
+
+    return {
+        "summary": critique.get("final_summary", draft_review["summary"]),
+        "risk_level": critique.get("final_risk_level", draft_review["risk_level"]),
+        "issues": final_issues,
+        "suggestions": [
+            f"Fix: {i['description']}"
+            for i in final_issues
+            if i.get("severity") == "HIGH"
+        ],
+        "test_cases_missing": [
+            i["description"]
+            for i in final_issues
+            if i.get("type") == "MISSING_TEST"
+        ]
     }
 
-    
+@observe(name="critic_agent")
 async def run_critic_agent(draft_review: dict, context: dict):
     diff_summary = json.dumps(context["diff"], indent=2)
     draft = json.dumps(draft_review, indent=2)
@@ -543,7 +544,8 @@ async def run_critic_agent(draft_review: dict, context: dict):
             false positives hata, severity fix karo"""
         }
     ]
-    response = await client.chat.completions.create(
+    response = await call_with_retry(
+        client.chat.completions.create,
         model="openai/gpt-4o",
         messages=messages,
         temperature=0,

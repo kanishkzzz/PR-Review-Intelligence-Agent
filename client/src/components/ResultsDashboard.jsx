@@ -4,11 +4,11 @@ import { ShieldAlert, Lightbulb, TestTube2, AlertTriangle } from "lucide-react";
 const riskColors = {
   HIGH: "bg-red-500/15 text-red-400 border-red-500/30",
   MEDIUM: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
-  LOW: "bg-green-500/15 text-gree-400 border-green-500/30"
+  LOW: "bg-green-500/15 text-green-400 border-green-500/30"
 };
 
 const severityColors = {
-  HIGH: "text-rd-400",
+  HIGH: "text-red-400",
   MEDIUM: "text-yellow-400",
   LOW: "text-blue-400"
 }
