@@ -18,7 +18,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -29,8 +29,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # Checks Python syntax without installing the large PyTorch environment.
-      - name: Validate Python files
+      - name: Validate Python syntax
         run: python -m compileall -q server
 
       - name: Login to Azure
@@ -40,7 +39,15 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_9BF49CBFC819445499ED01E4FBC7B90A }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_7EA3CFA4A4C848F9BBCB014AD9F3DBBC }}
 
-      - name: Configure Azure build and startup timeout
+      - name: Configure Azure Python runtime
+        run: |
+          az webapp config set \
+            --resource-group "${{ env.AZURE_RESOURCE_GROUP }}" \
+            --name "${{ env.AZURE_WEBAPP_NAME }}" \
+            --linux-fx-version "PYTHON|3.12" \
+            --output none
+
+      - name: Configure Azure application settings
         run: |
           az webapp config appsettings set \
             --resource-group "${{ env.AZURE_RESOURCE_GROUP }}" \
@@ -49,12 +56,44 @@ jobs:
               SCM_DO_BUILD_DURING_DEPLOYMENT=true \
               WEBSITES_CONTAINER_START_TIME_LIMIT=1800 \
               PYTHONUNBUFFERED=1 \
+              WEBSITE_WARMUP_PATH=/health \
+              WEBSITE_WARMUP_STATUSES=200 \
             --output none
 
       - name: Deploy backend to Azure
+        id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           slot-name: Production
           package: ./server
-          startup-command: "python -m uvicorn main:app --host 0.0.0.0 --port 8000"
+          startup-command: >-
+            python -m uvicorn main:app
+            --host 0.0.0.0
+            --port 8000
+
+      - name: Verify Azure health endpoint
+        shell: bash
+        run: |
+          APP_URL="${{ steps.deploy-to-webapp.outputs.webapp-url }}"
+          APP_URL="${APP_URL%/}"
+
+          if [ -z "$APP_URL" ]; then
+            echo "::error::Azure deployment did not return an application URL."
+            exit 1
+          fi
+
+          echo "Waiting for $APP_URL/health"
+
+          for attempt in {1..20}; do
+            if response=$(curl -fsS "$APP_URL/health" 2>/dev/null); then
+              echo "Application is healthy: $response"
+              exit 0
+            fi
+
+            echo "Health check attempt $attempt/20 failed; retrying in 30 seconds."
+            sleep 30
+          done
+
+          echo "::error::Azure application did not become healthy within 10 minutes."
+          exit 1
