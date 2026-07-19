@@ -1,130 +1,126 @@
-from dotenv import load_dotenv
-load_dotenv()
-
-from lmnr import Laminar
 import os
-Laminar.initialize(project_api_key=os.getenv("LMNR_PROJECT_API_KEY"))
+import chromadb
+from tools import fetch_file_context
+from sentence_transformers import SentenceTransformer
 
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from models import PRReviewRequest
-from agent import run_multi_agent_review
-from rag import index_repo
-from tools import fetch_pr_diff, parse_pr_url
-import httpx
+#setup
+chroma_client = chromadb.PersistentClient(path="./chroma-db")
+collection = chroma_client.get_or_create_collection(name="repo_index")
 
-app = FastAPI()
+_local_model = None
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def get_local_embedding_model():
+    global _local_model
+    if _local_model is None:
+        _local_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _local_model
 
 
-@app.post("/review")
-async def review_pr(request: PRReviewRequest):
-    try:
-        owner, repo, pr_number = parse_pr_url(request.pr_url)
-        repo_full_name = f"{owner}/{repo}"
+def get_embedding(text: str) -> list:
+    model = get_local_embedding_model()
+    return model.encode(text[:8000]).tolist()
 
-        diff = await fetch_pr_diff(request.pr_url, request.token)
-        changed_files = [f["filename"] for f in diff]
-        await index_repo(repo_full_name, changed_files, request.token)
+def chunk_code(content: str, file_path: str):
+    lines = content.split("\n")
+    chunks = []
+    current_chunk = []
 
-        result = await run_multi_agent_review(request.pr_url, request.token, diff=diff)
-        return result
+    BOUNDARY_KEYWORDS = (
+        "def", "async def", "class", "function",
+        "const ", "export function", "export const", "module.exports"
+    )
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        Laminar.force_flush()
+    for line in lines:
+        stripped = line.strip()
 
+        if any(stripped.startswith(kw) for kw in BOUNDARY_KEYWORDS):
+            if len(current_chunk) > 3:
+                chunk_text = "\n".join(current_chunk)
+                if chunk_text.strip():
+                    chunks.append(f"# File: {file_path}\n{chunk_text}")
+            current_chunk = [line]
+        else:
+            current_chunk.append(line)
 
-@app.post("/webhook")
-async def github_webhook(request: Request, background_tasks: BackgroundTasks):
-    payload = await request.json()
-    action = payload.get("action")
+        if len(current_chunk) > 80:
+            chunk_text = "\n".join(current_chunk)
+            if chunk_text.strip():
+                chunks.append(f"# File: {file_path}\n{chunk_text}")
+            current_chunk = []
 
-    if action not in ["opened", "synchronize"]:
-        return {"status": "ignored", "action": action}
+    if current_chunk:
+        chunk_text = "\n".join(current_chunk)
+        if chunk_text.strip():
+            chunks.append(f"# File: {file_path}\n{chunk_text}")
 
-    pr = payload.get("pull_request", {})
-    pr_url = pr.get("html_url")
-    repo_full_name = payload.get("repository", {}).get("full_name")
-    pr_number = pr.get("number")
+    return chunks  
 
-    print(f"Webhook Received! PR:{pr_url}")
-
-    background_tasks.add_task(process_pr_and_comment, pr_url, repo_full_name, pr_number)
-    return {"status": "processing"}
-
-
-async def process_pr_and_comment(pr_url: str, repo_full_name: str, pr_number: int):
-    try:
-        print(f"Processing PR: {pr_url}")
-        token = os.getenv("GITHUB_TOKEN")
-        diff = await fetch_pr_diff(pr_url, token)
-        changed_files = [f["filename"] for f in diff]
-        await index_repo(repo_full_name, changed_files, token)
-
-        review = await run_multi_agent_review(pr_url, token, diff=diff)
-        await post_github_comment(repo_full_name, pr_number, review)
-
-    except Exception as e:
-        print(f"Error processing PR: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        Laminar.force_flush()
+def get_embeddings_batch(texts: list) -> list:
+    model = get_local_embedding_model()
+    truncated = [t[:8000] for t in texts]
+    embeddings = model.encode(truncated)
+    return [e.tolist() for e in embeddings]
 
 
-async def post_github_comment(repo_full_name: str, pr_number: int, review: dict):
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        print("Github_token not set - Comment post nahi hoga")
+#Indexing the Report
+async def index_repo(repo_full_name: str, file_paths: list, token: str = None):
+    print(f"Indexing {len(file_paths)} files...")
+
+    all_chunks = []
+    all_ids = []
+    all_metadatas = []
+
+    for file_path in file_paths:
+        # Check if this file is already indexed — skip re-fetching/re-embedding
+        existing = collection.get(where={"file": file_path})
+        if existing["ids"]:
+            print(f"Skipping already-indexed file: {file_path}")
+            continue
+
+        content = await fetch_file_context(repo_full_name, file_path, token)
+
+        if content.startswith("[Skipped]") or content.startswith("[File not"):
+            continue
+
+        chunks = chunk_code(content, file_path)
+        for i, chunk in enumerate(chunks):
+            all_chunks.append(chunk)
+            all_ids.append(f"{file_path}_{i}")
+            all_metadatas.append({"file": file_path, "chunk_index": i})
+
+    if not all_chunks:
+        print("No new chunks to index")
         return
 
-    issues_text = ""
-    for issue in review.get("issues", []):
-        emoji = "🚨" if issue.get("severity") == "HIGH" else "⚠️" if issue.get("severity") == "MEDIUM" else "💡"
-        issues_text += f"{emoji} **{issue['type']}** - `{issue['file']}`\n{issue['description']}\n\n"
+    BATCH_SIZE = 20
+    for start in range(0, len(all_chunks), BATCH_SIZE):
+        batch_chunks = all_chunks[start:start + BATCH_SIZE]
+        batch_ids = all_ids[start:start + BATCH_SIZE]
+        batch_metadatas = all_metadatas[start:start + BATCH_SIZE]
 
-    comment_body = f"""## 🤖PR Review Intelligence Agent
-    
-**Risk Level:** {review.get('risk_level', 'UNKNOWN')}
+        embeddings = get_embeddings_batch(batch_chunks)
 
-**Summary:** {review.get('summary', '')}
-
----
-### Issues Found:
-{issues_text if issues_text else "No Major issues found!"}
-
-### Suggestions:
-{chr(10).join(f"- {s}" for s in review.get('suggestions', []))}
-
-### Missing Tests:
-{chr(10).join(f"- {t}" for t in review.get('test_cases_missing', []))}
----
-
-*Reviewed by PR Review Intelligence Agent - Multi-Agent System (Security + Logic + Test Coverage)*"""
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
-            json={"body": comment_body}
+        collection.upsert(
+            ids=batch_ids,
+            embeddings=embeddings,
+            documents=batch_chunks,
+            metadatas=batch_metadatas
         )
 
-    if response.status_code == 201:
-        print(f"Comment posted successfully on PR #{pr_number}!")
-    else:
-        print(f"Comment Post failed: {response.status_code} - {response.text}")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    print("Indexing Complete")
+ 
+  
+def search_similar_code_batch(queries: list, n_results: int = 2):
+    embeddings = get_embeddings_batch(queries)  # one API call for all filenames
+    results_map = {}
+    for query, embedding in zip(queries, embeddings):
+        results = collection.query(query_embeddings=[embedding], n_results=n_results)
+        similar_chunks = []
+        for i, doc in enumerate(results["documents"][0]):
+            similar_chunks.append({
+                "content": doc,
+                "file": results["metadatas"][0][i]["file"],
+                "score": results["distances"][0][i]
+            })
+        results_map[query] = similar_chunks
+    return results_map

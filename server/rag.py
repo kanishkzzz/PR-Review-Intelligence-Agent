@@ -1,126 +1,342 @@
+import asyncio
 import os
-import chromadb
+import tempfile
+import threading
+
 from tools import fetch_file_context
-from sentence_transformers import SentenceTransformer
 
-#setup
-chroma_client = chromadb.PersistentClient(path="./chroma-db")
-collection = chroma_client.get_or_create_collection(name="repo_index")
 
+_chroma_client = None
+_collection = None
 _local_model = None
 
+_collection_lock = threading.Lock()
+_model_lock = threading.Lock()
+
+
+def get_collection():
+    """
+    Initialize ChromaDB only when a review is requested.
+
+    Azure can start the API and answer health checks without loading
+    ChromaDB during application startup.
+    """
+    global _chroma_client, _collection
+
+    if _collection is None:
+        with _collection_lock:
+            if _collection is None:
+                import chromadb
+
+                chroma_path = os.getenv(
+                    "CHROMA_PATH",
+                    os.path.join(
+                        tempfile.gettempdir(),
+                        "bugbegone-chroma",
+                    ),
+                )
+
+                os.makedirs(chroma_path, exist_ok=True)
+
+                print(
+                    f"Initializing ChromaDB at: {chroma_path}",
+                    flush=True,
+                )
+
+                _chroma_client = chromadb.PersistentClient(
+                    path=chroma_path
+                )
+
+                _collection = (
+                    _chroma_client.get_or_create_collection(
+                        name="repo_index"
+                    )
+                )
+
+    return _collection
+
+
 def get_local_embedding_model():
+    """
+    Load SentenceTransformer and PyTorch only when embeddings are needed.
+    """
     global _local_model
+
     if _local_model is None:
-        _local_model = SentenceTransformer("all-MiniLM-L6-v2")
+        with _model_lock:
+            if _local_model is None:
+                from sentence_transformers import SentenceTransformer
+
+                model_name = os.getenv(
+                    "EMBEDDING_MODEL",
+                    "all-MiniLM-L6-v2",
+                )
+
+                print(
+                    f"Loading embedding model: {model_name}",
+                    flush=True,
+                )
+
+                model_options = {
+                    "device": "cpu",
+                }
+
+                cache_folder = os.getenv(
+                    "SENTENCE_TRANSFORMERS_HOME"
+                )
+
+                if cache_folder:
+                    model_options["cache_folder"] = cache_folder
+
+                _local_model = SentenceTransformer(
+                    model_name,
+                    **model_options,
+                )
+
+                print(
+                    "Embedding model loaded successfully",
+                    flush=True,
+                )
+
     return _local_model
 
 
 def get_embedding(text: str) -> list:
     model = get_local_embedding_model()
-    return model.encode(text[:8000]).tolist()
 
-def chunk_code(content: str, file_path: str):
+    embedding = model.encode(
+        text[:8000],
+        show_progress_bar=False,
+        convert_to_numpy=True,
+    )
+
+    return embedding.tolist()
+
+
+def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+
+    model = get_local_embedding_model()
+    truncated_texts = [text[:8000] for text in texts]
+
+    embeddings = model.encode(
+        truncated_texts,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+    )
+
+    return embeddings.tolist()
+
+
+def chunk_code(content: str, file_path: str) -> list[str]:
     lines = content.split("\n")
+
     chunks = []
     current_chunk = []
 
-    BOUNDARY_KEYWORDS = (
-        "def", "async def", "class", "function",
-        "const ", "export function", "export const", "module.exports"
+    boundary_keywords = (
+        "def",
+        "async def",
+        "class",
+        "function",
+        "const ",
+        "export function",
+        "export const",
+        "module.exports",
     )
 
     for line in lines:
         stripped = line.strip()
 
-        if any(stripped.startswith(kw) for kw in BOUNDARY_KEYWORDS):
+        if any(
+            stripped.startswith(keyword)
+            for keyword in boundary_keywords
+        ):
             if len(current_chunk) > 3:
                 chunk_text = "\n".join(current_chunk)
+
                 if chunk_text.strip():
-                    chunks.append(f"# File: {file_path}\n{chunk_text}")
+                    chunks.append(
+                        f"# File: {file_path}\n{chunk_text}"
+                    )
+
             current_chunk = [line]
+
         else:
             current_chunk.append(line)
 
         if len(current_chunk) > 80:
             chunk_text = "\n".join(current_chunk)
+
             if chunk_text.strip():
-                chunks.append(f"# File: {file_path}\n{chunk_text}")
+                chunks.append(
+                    f"# File: {file_path}\n{chunk_text}"
+                )
+
             current_chunk = []
 
     if current_chunk:
         chunk_text = "\n".join(current_chunk)
+
         if chunk_text.strip():
-            chunks.append(f"# File: {file_path}\n{chunk_text}")
+            chunks.append(
+                f"# File: {file_path}\n{chunk_text}"
+            )
 
-    return chunks  
-
-def get_embeddings_batch(texts: list) -> list:
-    model = get_local_embedding_model()
-    truncated = [t[:8000] for t in texts]
-    embeddings = model.encode(truncated)
-    return [e.tolist() for e in embeddings]
+    return chunks
 
 
-#Indexing the Report
-async def index_repo(repo_full_name: str, file_paths: list, token: str = None):
-    print(f"Indexing {len(file_paths)} files...")
+async def index_repo(
+    repo_full_name: str,
+    file_paths: list[str],
+    token: str | None = None,
+):
+    collection = get_collection()
+
+    print(
+        f"Indexing {len(file_paths)} files from {repo_full_name}",
+        flush=True,
+    )
 
     all_chunks = []
     all_ids = []
     all_metadatas = []
 
     for file_path in file_paths:
-        # Check if this file is already indexed — skip re-fetching/re-embedding
-        existing = collection.get(where={"file": file_path})
-        if existing["ids"]:
-            print(f"Skipping already-indexed file: {file_path}")
+        existing = collection.get(
+            where={
+                "$and": [
+                    {"repo": repo_full_name},
+                    {"file": file_path},
+                ]
+            }
+        )
+
+        if existing.get("ids"):
+            print(
+                f"Skipping already indexed file: {file_path}",
+                flush=True,
+            )
             continue
 
-        content = await fetch_file_context(repo_full_name, file_path, token)
+        content = await fetch_file_context(
+            repo_full_name,
+            file_path,
+            token,
+        )
 
-        if content.startswith("[Skipped]") or content.startswith("[File not"):
+        if not content:
+            continue
+
+        if content.startswith("[Skipped]"):
+            continue
+
+        if content.startswith("[File not"):
             continue
 
         chunks = chunk_code(content, file_path)
-        for i, chunk in enumerate(chunks):
+
+        for index, chunk in enumerate(chunks):
+            safe_repo_name = repo_full_name.replace("/", "_")
+            safe_file_name = file_path.replace("/", "_")
+
             all_chunks.append(chunk)
-            all_ids.append(f"{file_path}_{i}")
-            all_metadatas.append({"file": file_path, "chunk_index": i})
+
+            all_ids.append(
+                f"{safe_repo_name}_{safe_file_name}_{index}"
+            )
+
+            all_metadatas.append(
+                {
+                    "repo": repo_full_name,
+                    "file": file_path,
+                    "chunk_index": index,
+                }
+            )
 
     if not all_chunks:
-        print("No new chunks to index")
+        print("No new chunks to index", flush=True)
         return
 
-    BATCH_SIZE = 20
-    for start in range(0, len(all_chunks), BATCH_SIZE):
-        batch_chunks = all_chunks[start:start + BATCH_SIZE]
-        batch_ids = all_ids[start:start + BATCH_SIZE]
-        batch_metadatas = all_metadatas[start:start + BATCH_SIZE]
+    batch_size = 20
 
-        embeddings = get_embeddings_batch(batch_chunks)
+    for start in range(0, len(all_chunks), batch_size):
+        batch_chunks = all_chunks[start : start + batch_size]
+        batch_ids = all_ids[start : start + batch_size]
+        batch_metadatas = all_metadatas[
+            start : start + batch_size
+        ]
 
-        collection.upsert(
+        # Model loading and encoding run outside the main event loop.
+        embeddings = await asyncio.to_thread(
+            get_embeddings_batch,
+            batch_chunks,
+        )
+
+        await asyncio.to_thread(
+            collection.upsert,
             ids=batch_ids,
             embeddings=embeddings,
             documents=batch_chunks,
-            metadatas=batch_metadatas
+            metadatas=batch_metadatas,
         )
 
-    print("Indexing Complete")
- 
-  
-def search_similar_code_batch(queries: list, n_results: int = 2):
-    embeddings = get_embeddings_batch(queries)  # one API call for all filenames
+    print("Indexing complete", flush=True)
+
+
+def search_similar_code_batch(
+    queries: list[str],
+    n_results: int = 2,
+) -> dict:
+    collection = get_collection()
+
+    if not queries:
+        return {}
+
+    collection_count = collection.count()
+
+    if collection_count == 0:
+        return {query: [] for query in queries}
+
+    result_limit = min(n_results, collection_count)
+    embeddings = get_embeddings_batch(queries)
+
     results_map = {}
+
     for query, embedding in zip(queries, embeddings):
-        results = collection.query(query_embeddings=[embedding], n_results=n_results)
+        results = collection.query(
+            query_embeddings=[embedding],
+            n_results=result_limit,
+        )
+
+        documents = (results.get("documents") or [[]])[0] or []
+        metadatas = (results.get("metadatas") or [[]])[0] or []
+        distances = (results.get("distances") or [[]])[0] or []
+
         similar_chunks = []
-        for i, doc in enumerate(results["documents"][0]):
-            similar_chunks.append({
-                "content": doc,
-                "file": results["metadatas"][0][i]["file"],
-                "score": results["distances"][0][i]
-            })
+
+        for index, document in enumerate(documents):
+            metadata = (
+                metadatas[index]
+                if index < len(metadatas)
+                else {}
+            )
+
+            score = (
+                distances[index]
+                if index < len(distances)
+                else None
+            )
+
+            similar_chunks.append(
+                {
+                    "content": document,
+                    "file": metadata.get("file", "Unknown file"),
+                    "score": score,
+                }
+            )
+
         results_map[query] = similar_chunks
+
     return results_map
