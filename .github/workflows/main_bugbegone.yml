@@ -1,0 +1,60 @@
+name: Build and deploy BugBeGone backend to Azure
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AZURE_WEBAPP_NAME: BugBeGone
+  AZURE_RESOURCE_GROUP: pr-review-rg
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Checks Python syntax without installing the large PyTorch environment.
+      - name: Validate Python files
+        run: python -m compileall -q server
+
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_464215EB2E5E4F59B4E458B553B4D702 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_9BF49CBFC819445499ED01E4FBC7B90A }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_7EA3CFA4A4C848F9BBCB014AD9F3DBBC }}
+
+      - name: Configure Azure build and startup timeout
+        run: |
+          az webapp config appsettings set \
+            --resource-group "${{ env.AZURE_RESOURCE_GROUP }}" \
+            --name "${{ env.AZURE_WEBAPP_NAME }}" \
+            --settings \
+              SCM_DO_BUILD_DURING_DEPLOYMENT=true \
+              WEBSITES_CONTAINER_START_TIME_LIMIT=1800 \
+              PYTHONUNBUFFERED=1 \
+            --output none
+
+      - name: Deploy backend to Azure
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          slot-name: Production
+          package: ./server
+          startup-command: "python -m uvicorn main:app --host 0.0.0.0 --port 8000"
