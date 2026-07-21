@@ -3,6 +3,11 @@ import ReviewForm from "./components/ReviewForm";
 import ResultsDashboard from "./components/ResultsDashboard";
 import { Bot } from "lucide-react";
 
+const API_BASE_URL = (
+  import.meta.env.VITE_API_URL ||
+  "https://pr-review-intelligence-agent.onrender.com"
+).replace(/\/$/, "");
+
 export default function App() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -14,7 +19,7 @@ export default function App() {
     setResult(null);
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/review`, {
+      const response = await fetch(`${API_BASE_URL}/review`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pr_url: prUrl, token: token })
