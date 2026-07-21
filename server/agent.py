@@ -5,7 +5,16 @@ from dotenv import load_dotenv
 import asyncio
 load_dotenv()
 import os
-from lmnr import observe
+
+try:
+    from lmnr import observe
+except ImportError:
+    def observe(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
 from rag import search_similar_code_batch
 
 client = AsyncOpenAI(
