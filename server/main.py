@@ -5,7 +5,11 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from lmnr import Laminar
+
+try:
+    from lmnr import Laminar
+except ImportError:
+    Laminar = None
 
 from models import PRReviewRequest
 from rag import index_repo
@@ -14,21 +18,23 @@ from tools import fetch_pr_diff, parse_pr_url
 load_dotenv()
 
 
-# Laminar is optional and must not prevent Azure from starting.
+# Laminar is optional and must not prevent hosted deploys from starting.
 LMNR_KEY = os.getenv("LMNR_PROJECT_API_KEY")
 LMNR_ENABLED = False
 
-if LMNR_KEY:
+if LMNR_KEY and Laminar is not None:
     try:
         Laminar.initialize(project_api_key=LMNR_KEY)
         LMNR_ENABLED = True
         print("Laminar initialized successfully", flush=True)
     except Exception as exc:
         print(f"Laminar initialization failed: {exc}", flush=True)
+elif LMNR_KEY:
+    print("Laminar key configured, but lmnr is not installed", flush=True)
 
 
 def flush_laminar():
-    if LMNR_ENABLED:
+    if LMNR_ENABLED and Laminar is not None:
         try:
             Laminar.force_flush()
         except Exception as exc:
