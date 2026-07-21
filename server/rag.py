@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import tempfile
 import threading
 
@@ -14,6 +15,19 @@ _collection_lock = threading.Lock()
 _model_lock = threading.Lock()
 
 
+def use_hosted_sqlite_driver():
+    """
+    Hosted Python images can ship an old sqlite3 module. Chroma needs
+    SQLite >= 3.35, so use pysqlite3-binary when it is installed.
+    """
+    try:
+        import pysqlite3
+    except ImportError:
+        return
+
+    sys.modules["sqlite3"] = pysqlite3
+
+
 def get_collection():
     """
     Initialize ChromaDB only when a review is requested.
@@ -26,6 +40,7 @@ def get_collection():
     if _collection is None:
         with _collection_lock:
             if _collection is None:
+                use_hosted_sqlite_driver()
                 import chromadb
 
                 chroma_path = os.getenv(
